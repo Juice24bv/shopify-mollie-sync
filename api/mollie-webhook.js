@@ -1,4 +1,6 @@
 
+const fetch = require('node-fetch');
+
 module.exports = async function handler(req, res) {
   if (req.method !== 'POST') {
     console.log('❌ Webhook: Method not allowed');
@@ -7,23 +9,16 @@ module.exports = async function handler(req, res) {
 
   const body = req.body;
   console.log('✅ Webhook HIT');
-  console.log('📦 Received body:', JSON.stringify(body, null, 2));
+  console.log('📦 Body:', JSON.stringify(body, null, 2));
 
   const {
     id: payment_id,
     customerId: mollie_customer_id,
     mandateId: mandate_id,
-    sequenceType: sequence,
-    metadata
+    sequenceType,
+    metadata,
+    description
   } = body;
-
-  // ✅ Fallback for Mollie test webhook without metadata
-  if (!metadata || !metadata.shopify_customer_id || !metadata.shopify_order_id) {
-    console.log("⚠️ Geen metadata ontvangen – vermoedelijk test call van Mollie");
-    return res.status(200).json({ test: true });
-  }
-
-  const { shopify_customer_id, shopify_order_id } = metadata;
 
   const shopifyToken = process.env.SHOPIFY_ADMIN_API_TOKEN;
   const shopifyStore = process.env.SHOPIFY_STORE_DOMAIN;
@@ -34,65 +29,123 @@ module.exports = async function handler(req, res) {
     'X-Shopify-Access-Token': shopifyToken
   };
 
+  let shopify_customer_id = metadata?.shopify_customer_id || null;
+  let shopify_order_id = metadata?.shopify_order_id || null;
+  let customer_email = body?.customer?.email || 'no-email@example.com';
+
   try {
-    // 🧠 Write metafields to CUSTOMER
-    await fetch(`https://${shopifyStore}/admin/api/${apiVersion}/customers/${shopify_customer_id}/metafields.json`, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({
-        metafield: {
-          namespace: 'mollie',
-          key: 'customer_id',
-          value: mollie_customer_id,
-          type: 'single_line_text_field'
-        }
-      })
-    });
+    // ✅ 1. Zoek bestaande klant of maak nieuwe klant
+    if (!shopify_customer_id) {
+      const searchRes = await fetch(
+        `https://${shopifyStore}/admin/api/${apiVersion}/customers/search.json?query=email:${customer_email}`,
+        { method: 'GET', headers }
+      );
+      const searchData = await searchRes.json();
+      if (searchData.customers?.length > 0) {
+        shopify_customer_id = searchData.customers[0].id;
+        console.log('✅ Bestaande klant gevonden:', shopify_customer_id);
+      } else {
+        const createCustomerRes = await fetch(
+          `https://${shopifyStore}/admin/api/${apiVersion}/customers.json`,
+          {
+            method: 'POST',
+            headers,
+            body: JSON.stringify({
+              customer: {
+                first_name: 'Mollie',
+                last_name: 'Auto',
+                email: customer_email,
+                verified_email: true
+              }
+            })
+          }
+        );
+        const customerData = await createCustomerRes.json();
+        shopify_customer_id = customerData.customer.id;
+        console.log('✅ Nieuwe klant aangemaakt:', shopify_customer_id);
+      }
+    }
 
-    await fetch(`https://${shopifyStore}/admin/api/${apiVersion}/customers/${shopify_customer_id}/metafields.json`, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({
-        metafield: {
-          namespace: 'mollie',
-          key: 'mandate_id',
-          value: mandate_id || '',
-          type: 'single_line_text_field'
-        }
-      })
-    });
+    // ✅ 2. Maak Shopify-order aan
+    const createOrderRes = await fetch(
+      `https://${shopifyStore}/admin/api/${apiVersion}/orders.json`,
+      {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          order: {
+            line_items: [
+              {
+                title: description || 'Mollie Subscription',
+                price: body.amount?.value || '9.99',
+                quantity: 1
+              }
+            ],
+            customer: {
+              id: shopify_customer_id
+            },
+            financial_status: 'paid'
+          }
+        })
+      }
+    );
+    const orderData = await createOrderRes.json();
+    shopify_order_id = orderData.order.id;
+    console.log('✅ Order aangemaakt:', shopify_order_id);
 
-    // 🧾 Write metafields to ORDER
-    await fetch(`https://${shopifyStore}/admin/api/${apiVersion}/orders/${shopify_order_id}/metafields.json`, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({
-        metafield: {
-          namespace: 'mollie',
-          key: 'payment_id',
-          value: payment_id,
-          type: 'single_line_text_field'
-        }
-      })
-    });
+    // ✅ 3. Voeg metafields toe
 
-    await fetch(`https://${shopifyStore}/admin/api/${apiVersion}/orders/${shopify_order_id}/metafields.json`, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({
-        metafield: {
-          namespace: 'mollie',
-          key: 'sequence',
-          value: sequence,
-          type: 'single_line_text_field'
-        }
-      })
-    });
+    const metafields = [
+      {
+        target: 'customers',
+        id: shopify_customer_id,
+        namespace: 'mollie',
+        key: 'customer_id',
+        value: mollie_customer_id
+      },
+      {
+        target: 'customers',
+        id: shopify_customer_id,
+        namespace: 'mollie',
+        key: 'mandate_id',
+        value: mandate_id || ''
+      },
+      {
+        target: 'orders',
+        id: shopify_order_id,
+        namespace: 'mollie',
+        key: 'payment_id',
+        value: payment_id
+      },
+      {
+        target: 'orders',
+        id: shopify_order_id,
+        namespace: 'mollie',
+        key: 'sequence',
+        value: sequenceType
+      }
+    ];
 
-    console.log('✅ Metafields written to customer and order');
-    return res.status(200).json({ success: true });
+    for (const mf of metafields) {
+      const url = `https://${shopifyStore}/admin/api/${apiVersion}/${mf.target}/${mf.id}/metafields.json`;
+      await fetch(url, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          metafield: {
+            namespace: mf.namespace,
+            key: mf.key,
+            value: mf.value,
+            type: 'single_line_text_field'
+          }
+        })
+      });
+    }
+
+    console.log('✅ Metafields toegevoegd');
+    return res.status(200).json({ success: true, shopify_customer_id, shopify_order_id });
   } catch (error) {
-    console.error('❌ Webhook Error:', error);
-    return res.status(500).json({ error: 'Internal server error' });
+    console.error('❌ Fout in webhook:', error);
+    return res.status(500).json({ error: 'Webhook failure' });
   }
 }
