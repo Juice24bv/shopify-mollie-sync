@@ -1,5 +1,5 @@
 
-export default async function handler(req, res) {
+module.exports = async function handler(req, res) {
   if (req.method !== 'POST') {
     console.log('❌ Webhook: Method not allowed');
     return res.status(405).send('Method Not Allowed');
@@ -82,7 +82,7 @@ export default async function handler(req, res) {
       body: JSON.stringify({
         metafield: {
           namespace: 'mollie',
-          key: 'sequence",
+          key: 'sequence',
           value: sequence,
           type: 'single_line_text_field'
         }
