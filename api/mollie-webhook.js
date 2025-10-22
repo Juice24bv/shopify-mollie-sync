@@ -31,10 +31,10 @@ module.exports = async function handler(req, res) {
 
   let shopify_customer_id = metadata?.shopify_customer_id || null;
   let shopify_order_id = metadata?.shopify_order_id || null;
-  let customer_email = body?.customer?.email || 'no-email@example.com';
+  const customer_email = body?.customer?.email || 'no-email@example.com';
 
   try {
-    // ✅ 1. Zoek bestaande klant of maak nieuwe klant
+    // ✅ 1. Klant opzoeken of aanmaken
     if (!shopify_customer_id) {
       const searchRes = await fetch(
         `https://${shopifyStore}/admin/api/${apiVersion}/customers/search.json?query=email:${customer_email}`,
@@ -66,35 +66,36 @@ module.exports = async function handler(req, res) {
       }
     }
 
-    // ✅ 2. Maak Shopify-order aan
-    const createOrderRes = await fetch(
-      `https://${shopifyStore}/admin/api/${apiVersion}/orders.json`,
-      {
-        method: 'POST',
-        headers,
-        body: JSON.stringify({
-          order: {
-            line_items: [
-              {
-                title: description || 'Mollie Subscription',
-                price: body.amount?.value || '9.99',
-                quantity: 1
-              }
-            ],
-            customer: {
-              id: shopify_customer_id
-            },
-            financial_status: 'paid'
-          }
-        })
-      }
-    );
-    const orderData = await createOrderRes.json();
-    shopify_order_id = orderData.order.id;
-    console.log('✅ Order aangemaakt:', shopify_order_id);
+    // ✅ 2. Order aanmaken indien niet aanwezig
+    if (!shopify_order_id) {
+      const createOrderRes = await fetch(
+        `https://${shopifyStore}/admin/api/${apiVersion}/orders.json`,
+        {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({
+            order: {
+              line_items: [
+                {
+                  title: description || 'Mollie Subscription',
+                  price: body.amount?.value || '9.99',
+                  quantity: 1
+                }
+              ],
+              customer: {
+                id: shopify_customer_id
+              },
+              financial_status: 'paid'
+            }
+          })
+        }
+      );
+      const orderData = await createOrderRes.json();
+      shopify_order_id = orderData.order.id;
+      console.log('✅ Order aangemaakt:', shopify_order_id);
+    }
 
-    // ✅ 3. Voeg metafields toe
-
+    // ✅ 3. Metafields schrijven
     const metafields = [
       {
         target: 'customers',
@@ -142,10 +143,10 @@ module.exports = async function handler(req, res) {
       });
     }
 
-    console.log('✅ Metafields toegevoegd');
+    console.log('✅ Volledige flow afgerond');
     return res.status(200).json({ success: true, shopify_customer_id, shopify_order_id });
   } catch (error) {
-    console.error('❌ Fout in webhook:', error);
+    console.error('❌ Webhook fout:', error);
     return res.status(500).json({ error: 'Webhook failure' });
   }
 }
