@@ -1,6 +1,4 @@
 
-const fetch = require('node-fetch');
-
 module.exports = async function handler(req, res) {
   if (req.method !== 'POST') {
     console.log('❌ Webhook: Method not allowed');
